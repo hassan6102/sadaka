@@ -1,0 +1,166 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ---------- دوال مساعدة ----------
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    // المسؤول = مستخدم مسجّل دخوله ولديه مستند في admins بنفس الـ uid.
+    // مستندات admins تُنشأ يدويًا من Firebase Console فقط (لا كتابة من العميل).
+    function isAdmin() {
+      return signedIn()
+        && exists(/databases/$(database)/documents/admins/$(request.auth.uid));
+    }
+
+    function str(v, minLen, maxLen) {
+      return v is string && v.size() >= minLen && v.size() <= maxLen;
+    }
+
+    function optAmount(v) {
+      return v == null || (v is number && v >= 0 && v <= 1000000000);
+    }
+
+    // رابط فارغ أو https فقط (يمنع javascript: وغيره)
+    function optUrl(v) {
+      return v is string && v.size() <= 300 && (v == '' || v.matches('https://.*'));
+    }
+
+    // ---------- admins ----------
+    match /admins/{uid} {
+      allow get: if signedIn() && request.auth.uid == uid;
+      allow list, write: if false;
+    }
+
+    // ---------- cases ----------
+    function validCase(d, id) {
+      return d.keys().hasOnly([
+          'code', 'title', 'type', 'summary', 'details',
+          'requiredAmount', 'collectedAmount', 'showCollected',
+          'visibility', 'fundingStatus', 'featured', 'sortOrder',
+          'includeGeneralMethods', 'methodIds', 'createdAt', 'updatedAt'
+        ])
+        && d.keys().hasAll([
+          'code', 'title', 'type', 'summary', 'details',
+          'requiredAmount', 'collectedAmount', 'showCollected',
+          'visibility', 'fundingStatus', 'featured', 'sortOrder',
+          'includeGeneralMethods', 'methodIds', 'createdAt', 'updatedAt'
+        ])
+        && d.code == id
+        && str(d.title, 3, 150)
+        && str(d.type, 1, 40)
+        && str(d.summary, 1, 300)
+        && str(d.details, 1, 10000)
+        && optAmount(d.requiredAmount)
+        && optAmount(d.collectedAmount)
+        && d.showCollected is bool
+        && d.visibility in ['published', 'hidden', 'paused']
+        && d.fundingStatus in ['needs_support', 'completed']
+        && d.featured is bool
+        && d.sortOrder is int
+        && d.includeGeneralMethods is bool
+        && d.methodIds is list && d.methodIds.size() <= 20
+        && d.createdAt is timestamp
+        && d.updatedAt == request.time;
+    }
+
+    match /cases/{caseId} {
+      // الزوار: المنشورة فقط. (الاستعلام يجب أن يحتوي where visibility == 'published')
+      allow get, list: if isAdmin() || resource.data.visibility == 'published';
+      allow create: if isAdmin()
+        && validCase(request.resource.data, caseId)
+        && request.resource.data.createdAt == request.time;
+      allow update: if isAdmin()
+        && validCase(request.resource.data, caseId)
+        && request.resource.data.createdAt == resource.data.createdAt;
+      allow delete: if isAdmin();
+    }
+
+    // ---------- case_contacts ----------
+    // بيانات التواصل في مستند منفصل حتى لا تكون قابلة للقراءة إلا إذا سمحت الإدارة بذلك.
+    function validContact(d) {
+      return d.keys().hasOnly(['name', 'phone', 'whatsapp', 'show', 'updatedAt'])
+        && d.keys().hasAll(['name', 'phone', 'whatsapp', 'show', 'updatedAt'])
+        && str(d.name, 0, 80)
+        && str(d.phone, 0, 20)
+        && str(d.whatsapp, 0, 20)
+        && d.show is bool
+        && d.updatedAt == request.time;
+    }
+
+    match /case_contacts/{caseId} {
+      allow get: if isAdmin()
+        || (resource.data.show == true
+            && get(/databases/$(database)/documents/cases/$(caseId)).data.visibility == 'published');
+      allow list: if isAdmin();
+      allow create, update: if isAdmin() && validContact(request.resource.data);
+      allow delete: if isAdmin();
+    }
+
+    // ---------- donation_methods ----------
+    function validMethod(d) {
+      return d.keys().hasOnly([
+          'name', 'type', 'value', 'accountHolder', 'instructions',
+          'isGeneral', 'active', 'createdAt', 'updatedAt'
+        ])
+        && d.keys().hasAll([
+          'name', 'type', 'value', 'accountHolder', 'instructions',
+          'isGeneral', 'active', 'createdAt', 'updatedAt'
+        ])
+        && str(d.name, 2, 60)
+        && d.type in ['vodafone_cash', 'instapay', 'bank', 'other']
+        && str(d.value, 1, 120)
+        && str(d.accountHolder, 0, 80)
+        && str(d.instructions, 0, 300)
+        && d.isGeneral is bool
+        && d.active is bool
+        && d.createdAt is timestamp
+        && d.updatedAt == request.time;
+    }
+
+    match /donation_methods/{methodId} {
+      allow get, list: if isAdmin() || resource.data.active == true;
+      allow create: if isAdmin()
+        && validMethod(request.resource.data)
+        && request.resource.data.createdAt == request.time;
+      allow update: if isAdmin()
+        && validMethod(request.resource.data)
+        && request.resource.data.createdAt == resource.data.createdAt;
+      allow delete: if isAdmin();
+    }
+
+    // ---------- site_settings ----------
+    function validSettings(d) {
+      return d.keys().hasOnly([
+          'siteName', 'logoText', 'description', 'phone', 'whatsapp',
+          'facebook', 'instagram', 'x', 'youtube', 'telegram',
+          'email', 'address', 'footerText', 'updatedAt'
+        ])
+        && d.keys().hasAll([
+          'siteName', 'logoText', 'description', 'phone', 'whatsapp',
+          'facebook', 'instagram', 'x', 'youtube', 'telegram',
+          'email', 'address', 'footerText', 'updatedAt'
+        ])
+        && str(d.siteName, 2, 60)
+        && str(d.logoText, 0, 30)
+        && str(d.description, 0, 400)
+        && str(d.phone, 0, 20)
+        && str(d.whatsapp, 0, 20)
+        && optUrl(d.facebook) && optUrl(d.instagram) && optUrl(d.x)
+        && optUrl(d.youtube) && optUrl(d.telegram)
+        && str(d.email, 0, 120)
+        && str(d.address, 0, 200)
+        && str(d.footerText, 0, 300)
+        && d.updatedAt == request.time;
+    }
+
+    match /site_settings/{docId} {
+      allow get: if docId == 'main';
+      allow list: if false;
+      allow create, update: if isAdmin() && docId == 'main' && validSettings(request.resource.data);
+      allow delete: if false;
+    }
+  }
+}
